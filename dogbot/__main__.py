@@ -15,6 +15,12 @@ re-raises the captured signal. We install our own SIGTERM handler first, so
 that re-raise lands in `_make_stop_handler` (SystemExit(0)) and the cleanup
 in `main`'s `finally` runs instead of the process dying on the default
 handler. The same handler covers a SIGTERM during startup.
+
+Watchdog (I-1): a daemon thread checks the pipeline status. Once the first
+tick has happened, if `updated_at` stops advancing for WATCHDOG_STALL_S (a
+capture or inference call hung), it stops the sound, logs an `error` event
+{source: pipeline, error: stalled} and calls os._exit(1): systemd
+(Restart=on-failure) restarts the service with fresh camera/Hailo handles.
 """
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -36,6 +43,8 @@ log = logging.getLogger("dogbot")
 DEFAULT_HEF = "/home/admin/models/yolo26s.hef"
 DEFAULT_PORT = 8080
 JOIN_TIMEOUT_S = 3.0
+WATCHDOG_STALL_S = 3.0
+WATCHDOG_INTERVAL_S = 0.5
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -139,6 +148,53 @@ def shutdown(rt: Runtime | None, thread: threading.Thread | None) -> None:
     log.info("DogBot stopped")
 
 
+class Watchdog:
+    """Exits the process when the pipeline stops updating its status.
+
+    Not armed until the first tick (`updated_at` is None until then), so a
+    slow camera/Hailo start never trips it, and never fires while the
+    service is shutting down."""
+
+    def __init__(self, status_fn: Callable[[], dict], sound, events, *,
+                 stall_s: float = WATCHDOG_STALL_S,
+                 clock: Callable[[], float] = time.monotonic,
+                 exit_fn: Callable[[int], Any] = os._exit,
+                 is_stopping: Callable[[], bool] = lambda: False):
+        self._status = status_fn
+        self._sound = sound
+        self._events = events
+        self._stall_s = stall_s
+        self._clock = clock
+        self._exit = exit_fn
+        self._is_stopping = is_stopping
+
+    def check(self) -> bool:
+        """One look; True if it fired."""
+        if self._is_stopping():
+            return False
+        try:
+            updated_at = self._status().get("updated_at")
+        except Exception:
+            log.exception("watchdog: status() failed")
+            return False
+        if updated_at is None:
+            return False                       # not armed until the first tick
+        age = self._clock() - updated_at
+        if age < self._stall_s or self._is_stopping():
+            return False
+        log.error("watchdog: pipeline stalled (no update for %.1fs); exiting for a restart", age)
+        _quietly(self._sound.stop, "watchdog sound stop")
+        _quietly(lambda: self._events.log("error", {"source": "pipeline", "error": "stalled"}),
+                 "watchdog event log")
+        self._exit(1)
+        return True
+
+    def run(self, stop: threading.Event, interval: float = WATCHDOG_INTERVAL_S) -> None:
+        while not stop.wait(interval):
+            if self.check():
+                return
+
+
 class _Holder:
     runtime: Runtime | None = None
     stopping: bool = False
@@ -169,6 +225,10 @@ def main(argv=None, *, build_fn: Callable[[argparse.Namespace], Runtime] = build
         thread = threading.Thread(target=rt.pipeline.run_forever, args=(rt.state.stop,),
                                   name="dogbot-pipeline", daemon=True)
         thread.start()
+        dog = Watchdog(rt.pipeline.status, rt.sound, rt.events,
+                       is_stopping=lambda: holder.stopping or rt.state.stop.is_set())
+        threading.Thread(target=dog.run, args=(rt.state.stop,), name="dogbot-watchdog",
+                         daemon=True).start()
         log.info("DogBot listening on http://%s:%d", args.host, args.port)
         server_factory(rt.state, args.host, args.port).run()
     except KeyboardInterrupt:

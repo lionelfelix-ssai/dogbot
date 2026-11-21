@@ -46,6 +46,8 @@ JPEG_QUALITY = 75
 JPEG_EVERY = 2
 FPS_ALPHA = 0.1
 SNAPSHOT_KINDS = ("intrusion", "unresolved")
+FAULT_BACKOFF_S = 0.2        # between steps while in fault: no CPU spin
+STEP_ERROR_BACKOFF_S = 0.1   # after a non-vision exception in step()
 
 
 def letterbox_params(frame_w: int, frame_h: int, size: int = INPUT_SIZE):
@@ -144,6 +146,8 @@ class Pipeline:
         self._occupied = False
         self._last_dog_in_zone: float | None = None
         self._fault = False
+        self._step_faulted = False
+        self._pipeline_error = False
         self._good_ticks = 0
         self._last_tick: float | None = None
         self._fps = 0.0
@@ -152,6 +156,7 @@ class Pipeline:
         self.last_tracks: list[TrackedDet] = []
         self._jpeg: bytes | None = None
         self._status = self._build_status(s, now, [], [])
+        self._status["updated_at"] = None   # no tick yet: the watchdog arms on the first
 
     # -- public -----------------------------------------------------------
 
@@ -174,16 +179,37 @@ class Pipeline:
     def run_forever(self, stop_event) -> None:
         try:
             while not stop_event.is_set():
+                self._step_faulted = False
                 try:
                     self.step()
-                except Exception:
+                except Exception as e:
                     # Not a vision fault (those are handled in step); e.g. the
-                    # event DB failed. Silence, log, keep going.
+                    # event DB failed. Silence, flag it, log once per streak.
                     log.exception("pipeline step failed")
                     self._safe_stop()
-                    time.sleep(0.1)
+                    self._on_step_error(e)
+                    stop_event.wait(STEP_ERROR_BACKOFF_S)
+                    continue
+                if self._pipeline_error:
+                    self._pipeline_error = False
+                    self._status = {**self._status, "pipeline_error": False}
+                if self._step_faulted:
+                    stop_event.wait(FAULT_BACKOFF_S)
         finally:
             self._safe_stop()
+
+    def _on_step_error(self, exc: Exception) -> None:
+        first = not self._pipeline_error
+        self._pipeline_error = True
+        # The loop is alive (just failing), so updated_at advances: the
+        # watchdog is for a *hung* loop. The UI shows pipeline_error.
+        self._status = {**self._status, "pipeline_error": True,
+                        "updated_at": self._clock()}
+        if first:
+            try:
+                self._events.log("error", {"source": "pipeline", "error": repr(exc)})
+            except Exception:
+                log.exception("could not log pipeline error event")
 
     def step(self) -> None:
         now = self._clock()
@@ -310,6 +336,7 @@ class Pipeline:
             log.exception("sound stop failed")
 
     def _on_fault(self, s: Settings, now: float, exc: Exception) -> None:
+        self._step_faulted = True
         self._good_ticks = 0
         if not self._fault:
             self._fault = True
@@ -338,6 +365,8 @@ class Pipeline:
             "dogs": len(dogs),
             "people": len(people),
             "occupied": self._occupied,
+            "pipeline_error": self._pipeline_error,
+            "updated_at": now,
         }
 
     def _render(self, s: Settings, rule_events) -> None:

@@ -92,7 +92,7 @@ class FakePipeline:
         return JPEG
 
     def status(self):
-        return {"armed": False, "fault": False, "fps": 30.0}
+        return {"armed": False, "fault": False, "fps": 30.0, "updated_at": time.monotonic()}
 
 
 def factories(rec):
@@ -330,3 +330,110 @@ def test_sigterm_with_open_mjpeg_stream_exits_fast(tmp_path):
     assert not errors, errors
     assert rec.calls[-2:] == ["detector.close", "source.close"]
     assert elapsed < 5, f"shutdown took {elapsed:.1f}s with a stream open"
+
+
+# -- I-1: watchdog ------------------------------------------------------------
+
+class Clock:
+    def __init__(self, t=100.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+class WDRig:
+    def __init__(self, tmp_path):
+        self.rec = Recorder()
+        self.status = {"updated_at": None}
+        self.clock = Clock()
+        self.exits = []
+        self.stopping = False
+        self.events = EventStore(tmp_path / "events.db", tmp_path / "snaps")
+        self.sound = FakeSound(self.rec, None)
+        self.wd = svc.Watchdog(lambda: dict(self.status), self.sound, self.events,
+                               clock=self.clock, exit_fn=self.exits.append,
+                               is_stopping=lambda: self.stopping)
+
+    def stalled_events(self):
+        return [e["detail"] for e in self.events.list(kinds={"error"})]
+
+
+def test_watchdog_not_armed_before_first_tick(tmp_path):
+    r = WDRig(tmp_path)
+    r.clock.t += 600                      # camera/Hailo slow to open: fine
+    assert r.wd.check() is False
+    assert r.exits == [] and r.rec.calls == []
+
+
+def test_watchdog_quiet_while_ticking(tmp_path):
+    r = WDRig(tmp_path)
+    for _ in range(20):
+        r.clock.t += 0.5
+        r.status["updated_at"] = r.clock.t - 0.1
+        assert r.wd.check() is False
+    assert r.exits == []
+
+
+def test_watchdog_fires_on_stall(tmp_path):
+    r = WDRig(tmp_path)
+    r.status["updated_at"] = r.clock.t
+    r.clock.t += 2.9
+    assert r.wd.check() is False
+    r.clock.t += 0.2                      # 3.1 s without an update
+    assert r.wd.check() is True
+    assert r.rec.calls == ["sound.stop"]
+    assert r.stalled_events() == [{"source": "pipeline", "error": "stalled"}]
+    assert r.exits == [1]
+
+
+def test_watchdog_never_fires_while_shutting_down(tmp_path):
+    r = WDRig(tmp_path)
+    r.status["updated_at"] = r.clock.t
+    r.clock.t += 10
+    r.stopping = True
+    assert r.wd.check() is False
+    assert r.exits == []
+
+
+def test_watchdog_exits_even_if_stop_and_log_fail(tmp_path):
+    r = WDRig(tmp_path)
+
+    def boom(*a, **k):
+        raise OSError("nope")
+
+    r.sound.stop = boom
+    r.events.log = boom
+    r.status["updated_at"] = r.clock.t
+    r.clock.t += 5
+    assert r.wd.check() is True
+    assert r.exits == [1]
+
+
+def test_watchdog_thread_ends_with_stop_event(tmp_path):
+    r = WDRig(tmp_path)
+    stop = threading.Event()
+    t = threading.Thread(target=r.wd.run, args=(stop, 0.01))
+    t.start()
+    time.sleep(0.05)
+    stop.set()
+    t.join(1)
+    assert not t.is_alive() and r.exits == []
+
+
+def test_main_starts_watchdog(tmp_path, monkeypatch):
+    started = []
+    real = svc.Watchdog
+
+    class Spy(real):
+        def run(self, stop, interval=svc.WATCHDOG_INTERVAL_S):
+            started.append(self)
+            super().run(stop, interval)
+
+    monkeypatch.setattr(svc, "Watchdog", Spy)
+    rec = Recorder()
+    argv = ["--config", str(tmp_path / "settings.json"), "--data-dir", str(tmp_path / "data")]
+    with pytest.raises(SystemExit):
+        svc.main(argv, build_fn=lambda a: svc.build(a, **factories(rec)),
+                 server_factory=SignalServer)
+    assert len(started) == 1

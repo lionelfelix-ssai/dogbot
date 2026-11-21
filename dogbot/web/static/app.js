@@ -53,6 +53,12 @@ let lastStatus = null;
 let powerBusy = false;
 
 function describe(st) {
+  if (st.stale) {
+    return ["fault", "FAULT", "No data from the camera loop. DogBot stays silent; the service restarts itself if the loop is stuck."];
+  }
+  if (st.pipeline_error) {
+    return ["fault", "FAULT", "The camera loop is failing (see the event log). DogBot stays silent until it recovers."];
+  }
   if (st.fault) {
     return ["fault", "FAULT", "Camera or detector problem. DogBot stays silent until it recovers."];
   }
@@ -87,7 +93,7 @@ function renderStatus(st) {
   const [state, title, sub] = describe(st);
   const banner = $("#banner");
   banner.dataset.state = state;
-  banner.classList.toggle("blasting", !!st.armed && st.state === "blasting" && st.enabled && !st.fault);
+  banner.classList.toggle("blasting", !!st.armed && st.state === "blasting" && st.enabled && !st.fault && !st.stale);
   document.body.dataset.state = state;
   $("#banner-title").textContent = title;
   $("#banner-sub").textContent = sub;
@@ -103,7 +109,7 @@ function renderStatus(st) {
   setReadout("#r-dogs", st.dogs, st.dogs > 0 ? "warm" : "");
   setReadout("#r-people", st.people, "");
   setReadout("#r-couch", st.occupied ? "DOG" : "clear", st.occupied ? "hot" : "");
-  setReadout("#r-state", st.fault ? "fault" : st.state, st.state === "blasting" ? "hot" : "");
+  setReadout("#r-state", (st.fault || st.stale || st.pipeline_error) ? "fault" : st.state, st.state === "blasting" ? "hot" : "");
   setReadout("#r-round", st.round ? `R${st.round} · S${st.sequence}` : "–", "");
   setReadout("#r-fps", Number(st.fps || 0).toFixed(1), "");
   $("#zone-warn").hidden = st.zone_set !== false;

@@ -36,13 +36,15 @@ class FakePipeline:
         self.raw = RAW
         self.armed = False
         self.jpeg_calls = 0
+        self.updated_at = "now"
 
     def status(self):
         s = self._settings()
         return {"armed": self.armed, "enabled": s.enabled, "fault": False,
                 "state": "idle", "round": 0, "sequence": 0,
                 "seconds_until_armed": 42.0, "fps": 30.0, "dogs": 0,
-                "people": 1, "occupied": False}
+                "people": 1, "occupied": False, "pipeline_error": False,
+                "updated_at": time.monotonic() if self.updated_at == "now" else self.updated_at}
 
     def latest_jpeg(self):
         self.jpeg_calls += 1
@@ -316,6 +318,20 @@ def test_status_includes_sound_error(rig):
     snd.last_error = APLAY_ERR
     rig.state.sound = snd
     assert rig.client.get("/api/status").json()["sound_error"] == APLAY_ERR
+
+
+def test_status_not_stale_when_fresh(rig):
+    assert rig.client.get("/api/status").json()["stale"] is False
+
+
+def test_status_stale_when_pipeline_stops_updating(rig):
+    rig.pipe.updated_at = time.monotonic() - 2.5
+    assert rig.client.get("/api/status").json()["stale"] is True
+
+
+def test_status_stale_before_first_tick(rig):
+    rig.pipe.updated_at = None
+    assert rig.client.get("/api/status").json()["stale"] is True
 
 
 def test_test_blast_sound_failure(rig):

@@ -35,6 +35,8 @@ NO_STORE = {"Cache-Control": "no-store"}
 # After a test blast starts, watch this long for aplay failing at once (no
 # device, busy device): the owner then sees the error instead of "ok".
 TEST_BLAST_CHECK_S = 0.3
+# /api/status says stale when the pipeline hasn't updated for this long.
+STALE_S = 2.0
 TEST_BLAST_POLL_S = 0.02
 
 # Fields PUT /api/settings may change. `zone` has its own route.
@@ -191,6 +193,8 @@ def create_app(state: AppState) -> FastAPI:
         st["enabled"] = s.enabled     # authoritative now, not at the next tick
         st["zone_set"] = bool(s.zone)
         st["sound_error"] = getattr(state.sound, "last_error", None)
+        updated_at = st.get("updated_at")
+        st["stale"] = updated_at is None or time.monotonic() - updated_at > STALE_S
         return st
 
     @app.get("/api/settings")

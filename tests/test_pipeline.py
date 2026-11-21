@@ -1,4 +1,5 @@
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -404,3 +405,112 @@ def test_raw_jpeg_is_the_unannotated_frame(rig):
     assert raw.shape == rig.source.main.shape
     assert np.abs(raw.astype(int) - 200).max() <= 3    # no banner, no zone
     assert np.abs(annotated.astype(int) - 200).max() > 50
+
+
+# -- I-1: a failing or hung pipeline is visible --------------------------------
+
+def run_script(rig, script):
+    """run_forever with each step's behaviour scripted: "ok" steps normally,
+    "boom" raises a non-vision error. Stops after the script."""
+    stop = threading.Event()
+    todo = list(script)
+    orig = Pipeline.step.__get__(rig.pipe)   # the real step, even on a re-run
+
+    def step():
+        rig.clock.t += DT
+        what = todo.pop(0)
+        if not todo:
+            stop.set()          # last scripted step; the loop exits after it
+        if what == "boom":
+            raise RuntimeError("event DB is locked")
+        orig()
+
+    rig.pipe.step = step
+    rig.pipe.run_forever(stop)
+
+
+def pipeline_errors(rig):
+    return [e["detail"] for e in rig.events.list(limit=1000, kinds={"error"})
+            if e["detail"].get("source") == "pipeline"]
+
+
+def test_status_has_updated_at_and_pipeline_error(rig):
+    st = rig.pipe.status()
+    assert st["updated_at"] is None          # no tick yet: watchdog not armed
+    assert st["pipeline_error"] is False
+    rig.run(DT)
+    assert rig.pipe.status()["updated_at"] == rig.clock.t
+
+
+def test_fault_tick_still_updates_updated_at(rig):
+    rig.run(DT)
+    rig.detector.fail = True
+    rig.run(DT)
+    assert rig.pipe.status()["updated_at"] == rig.clock.t
+
+
+def test_non_vision_exception_logs_one_error_per_streak(rig, monkeypatch):
+    monkeypatch.setattr("dogbot.pipeline.STEP_ERROR_BACKOFF_S", 0)
+    run_script(rig, ["ok", "boom", "boom", "boom"])
+    assert rig.pipe.status()["pipeline_error"] is True
+    errs = pipeline_errors(rig)
+    assert len(errs) == 1 and "event DB is locked" in errs[0]["error"]
+
+    run_script(rig, ["ok"])
+    assert rig.pipe.status()["pipeline_error"] is False   # cleared on the next good tick
+    run_script(rig, ["boom", "boom", "ok", "boom"])
+    assert rig.pipe.status()["pipeline_error"] is True
+    assert len(pipeline_errors(rig)) == 3           # one per streak
+
+
+def test_pipeline_error_event_failure_does_not_kill_loop(rig, monkeypatch):
+    monkeypatch.setattr("dogbot.pipeline.STEP_ERROR_BACKOFF_S", 0)
+
+    def broken_log(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rig.events, "log", broken_log)
+    run_script(rig, ["boom", "boom"])          # must return normally
+    assert rig.pipe.status()["pipeline_error"] is True
+    assert isinstance(rig.sound.cmds[-1], StopSound)
+
+
+# -- I-2: a fault doesn't spin the CPU -------------------------------------------
+
+def test_fault_backs_off_between_steps(rig):
+    rig.detector.fail = True
+    stop = threading.Event()
+    count = {"n": 0}
+    orig = rig.pipe.step
+
+    def step():
+        count["n"] += 1
+        rig.clock.t += DT
+        orig()
+
+    rig.pipe.step = step
+    t = threading.Thread(target=rig.pipe.run_forever, args=(stop,))
+    t.start()
+    time.sleep(0.5)
+    stop.set()
+    t.join(2)
+    assert not t.is_alive()
+    assert 1 <= count["n"] <= 5, count["n"]     # ~0.2 s apart, not a spin
+
+
+def test_healthy_steps_do_not_back_off(rig):
+    stop = threading.Event()
+    count = {"n": 0}
+    orig = rig.pipe.step
+
+    def step():
+        count["n"] += 1
+        rig.clock.t += DT
+        orig()
+        if count["n"] >= 20:
+            stop.set()
+
+    rig.pipe.step = step
+    t0 = time.monotonic()
+    rig.pipe.run_forever(stop)
+    assert time.monotonic() - t0 < 1.0
