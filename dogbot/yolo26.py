@@ -18,6 +18,10 @@ Box channels are (l, t, r, b) distances in grid units from the anchor
 decoded boxes land on the person and the dog.
 
 The model is NMS-free; a per-class NMS at IoU 0.7 is kept only as a guard.
+
+Errors (ruling R4): outputs with no box/class head pair raise ValueError
+(the pipeline treats that as a vision fault). Boxes with zero or negative
+width/height after clipping to [0, 1] are dropped.
 """
 from __future__ import annotations
 
@@ -54,8 +58,13 @@ def _heads(outputs: dict[str, np.ndarray]) -> list[tuple[np.ndarray, np.ndarray]
 def decode_yolo26(outputs: dict[str, np.ndarray], conf_thresh: float,
                   keep: set[int] = _DEFAULT_KEEP, input_size: int = 640) -> list[Detection]:
     keep_ids = np.array(sorted(keep), dtype=np.int64)
+    heads = _heads(outputs)
+    if not heads:
+        raise ValueError(
+            "no YOLO26 box/class head pairs in outputs: "
+            + ", ".join(f"{k}{np.shape(v)}" for k, v in outputs.items()))
     all_boxes, all_scores, all_cls = [], [], []
-    for box, cls in _heads(outputs):
+    for box, cls in heads:
         g = box.shape[0]
         stride = input_size / g
         logits = cls.reshape(-1, cls.shape[2])
@@ -70,9 +79,13 @@ def decode_yolo26(outputs: dict[str, np.ndarray], conf_thresh: float,
         ltrb = box.reshape(-1, 4)[idx].astype(np.float64)
         xyxy = np.stack([ax - ltrb[:, 0], ay - ltrb[:, 1],
                          ax + ltrb[:, 2], ay + ltrb[:, 3]], axis=1) * stride / input_size
-        all_boxes.append(np.clip(xyxy, 0.0, 1.0))
-        all_scores.append(score[idx])
-        all_cls.append(best[idx])
+        xyxy = np.clip(xyxy, 0.0, 1.0)
+        valid = (xyxy[:, 2] > xyxy[:, 0]) & (xyxy[:, 3] > xyxy[:, 1])
+        if not valid.any():
+            continue
+        all_boxes.append(xyxy[valid])
+        all_scores.append(score[idx][valid])
+        all_cls.append(best[idx][valid])
     if not all_boxes:
         return []
     boxes = np.concatenate(all_boxes)

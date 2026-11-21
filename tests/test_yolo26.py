@@ -59,3 +59,40 @@ def test_fixture_finds_dog_and_person():
     for d in dets:
         x1, y1, x2, y2 = d.box
         assert 0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0
+
+
+def test_no_heads_raises():
+    with pytest.raises(ValueError):
+        decode_yolo26({}, conf_thresh=0.5)
+    with pytest.raises(ValueError):
+        decode_yolo26({"junk": np.zeros((7, 3), dtype=np.float32)}, conf_thresh=0.5)
+
+
+def test_unpaired_heads_raise():
+    out = _empty_outputs()
+    for name in ("yolo26s/conv64", "yolo26s/conv80", "yolo26s/conv94"):
+        del out[name]  # box heads only, no class heads
+    with pytest.raises(ValueError):
+        decode_yolo26(out, conf_thresh=0.5)
+
+
+def test_drops_zero_area_box():
+    out = _single_cell(16)
+    out["yolo26s/conv91"][5, 10] = [0.0, 1.0, 0.0, 1.0]  # zero width
+    assert decode_yolo26(out, conf_thresh=0.5) == []
+
+
+def test_drops_inverted_box():
+    out = _single_cell(16)
+    out["yolo26s/conv91"][5, 10] = [-1.0, 1.0, -1.0, 1.0]  # x2 < x1
+    assert decode_yolo26(out, conf_thresh=0.5) == []
+
+
+def test_drops_box_collapsed_by_clipping():
+    out = _single_cell(16)
+    # cell (gx=19) sits at the right edge; box entirely right of the image
+    out["yolo26s/conv91"][5, 10] = [0.0, 0.0, 0.0, 0.0]
+    out["yolo26s/conv91"][5, 19] = [-2.0, 1.0, 3.0, 1.0]
+    out["yolo26s/conv94"][5, 10, 16] = LOW
+    out["yolo26s/conv94"][5, 19, 16] = HIGH
+    assert decode_yolo26(out, conf_thresh=0.5) == []
