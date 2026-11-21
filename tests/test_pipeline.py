@@ -374,3 +374,20 @@ def test_pipeline_maps_letterboxed_boxes_to_frame(tmp_path):
     (t,) = pipe.last_tracks
     assert t.det.box == pytest.approx((0.4, 0.5, 0.6, 0.9))
     assert t.in_zone
+
+
+def test_person_present_never_blasts_with_zero_grace(rig):
+    rig.settings.rearm_grace_s = 0
+    rig.run(30, [PERSON, DOG_ON_COUCH])
+    assert rig.plays() == []
+    st = rig.pipe.status()
+    assert st["armed"] is False and st["people"] == 1
+
+
+def test_extra_presence_never_blasts_with_zero_grace(rig):
+    rig.settings.rearm_grace_s = 0
+    rig.extra_presence.append(lambda: True)
+    rig.run(30, [DOG_ON_COUCH])
+    assert rig.plays() == []
+    st = rig.pipe.status()
+    assert st["armed"] is False and st["people"] == 0

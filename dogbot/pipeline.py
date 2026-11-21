@@ -212,13 +212,14 @@ class Pipeline:
 
         # arming: any single frame with a person, or any extra source
         person = bool(people) or self._extra_presence()
-        armed = self._arming.update(now, person) and not self._fault
+        # A person this tick always means disarmed, even with rearm_grace_s = 0.
+        armed = self._arming.update(now, person) and not self._fault and not person
         if not self._fault and armed != self._armed:
             self._events.log("armed" if armed else "disarmed", {})
         if not self._fault:
             self._armed = armed
 
-        active = s.enabled and self._armed and not self._fault
+        active = s.enabled and self._armed and not self._fault and not person
         rule_events = self._guard_update(now, active, self._occupied)
 
         tracks = dog_tracks + [TrackedDet(p, None, False) for p in people]
