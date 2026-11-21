@@ -1,6 +1,8 @@
 """LAN web app: live view, on/off, couch zone, tuning, test blasts, event log.
 
-No auth (LAN-only MVP). The Settings object is shared with the pipeline
+No auth (LAN-only MVP), but the Host header must be one of the service's own
+names/addresses (TrustedHostMiddleware), so a DNS-rebinding page in a LAN
+browser can't drive the API. The Settings object is shared with the pipeline
 thread: writers hold `AppState.lock`, build a new Settings, validate and save
 it, and only then swap the reference. A Settings object is never mutated in
 place, so `get_settings()` (what the pipeline and the sound action call every
@@ -20,6 +22,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from dogbot.config import Settings, load_settings_checked, save_settings, validate_zone
 from dogbot.rules import PlayBlasts
@@ -153,7 +156,9 @@ def _require_obj(payload: Any) -> dict:
     return payload
 
 
-def create_app(state: AppState) -> FastAPI:
+def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastAPI:
+    """`allowed_hosts` None = no Host check (unit tests only); the service
+    (`python -m dogbot`) always passes a list."""
     @asynccontextmanager
     async def lifespan(_app):
         yield
@@ -162,6 +167,9 @@ def create_app(state: AppState) -> FastAPI:
     app = FastAPI(title="DogBot", docs_url=None, redoc_url=None, openapi_url=None,
                   lifespan=lifespan)
     app.state.dogbot = state
+    if allowed_hosts is not None:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts),
+                           www_redirect=False)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     # -- pages and frames -----------------------------------------------------
@@ -307,7 +315,8 @@ def create_app(state: AppState) -> FastAPI:
     return app
 
 
-def make_server(state: AppState, host: str = "0.0.0.0", port: int = 8080):
+def make_server(state: AppState, host: str = "0.0.0.0", port: int = 8080,
+                allowed_hosts: list[str] | None = None):
     """A uvicorn Server whose signal handling also ends open MJPEG streams.
 
     uvicorn waits for in-flight responses before running lifespan shutdown,
@@ -320,5 +329,6 @@ def make_server(state: AppState, host: str = "0.0.0.0", port: int = 8080):
             state.shutdown()
             super().handle_exit(sig, frame)
 
-    config = uvicorn.Config(create_app(state), host=host, port=port, log_level="info")
+    config = uvicorn.Config(create_app(state, allowed_hosts), host=host, port=port,
+                            log_level="info")
     return _Server(config)

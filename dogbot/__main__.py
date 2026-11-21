@@ -25,9 +25,13 @@ capture or inference call hung), it stops the sound, logs an `error` event
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import logging
 import os
 import signal
+import socket
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -59,7 +63,59 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="event DB and snapshots (default: $DOGBOT_DATA or data/)")
     ap.add_argument("--lens-position", type=float, default=None,
                     help="fixed focus (dioptres); default continuous autofocus")
+    ap.add_argument("--allowed-hosts", default=os.environ.get("DOGBOT_ALLOWED_HOSTS"),
+                    help="comma-separated Host header values to accept (default: "
+                         "$DOGBOT_ALLOWED_HOSTS, else localhost, 127.0.0.1, the "
+                         "hostname, <hostname>.local and this machine's IPv4 addresses)")
     return ap.parse_args(argv)
+
+
+def _local_ipv4s() -> list[str]:
+    """This machine's IPv4 addresses, best effort, stdlib only (plus
+    `hostname -I` on Linux, which lists every interface address)."""
+    found: list[str] = ["127.0.0.1"]
+
+    def add(ip: str) -> None:
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return
+        if addr.version == 4 and not addr.is_unspecified and ip not in found:
+            found.append(ip)
+
+    if sys.platform.startswith("linux"):
+        try:
+            out = subprocess.run(["hostname", "-I"], capture_output=True, text=True,
+                                 timeout=2).stdout
+            for tok in out.split():
+                add(tok)
+        except Exception:
+            log.warning("hostname -I failed", exc_info=True)
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            add(info[4][0])
+    except OSError:
+        pass
+    try:  # the address of the default route's interface (no packet is sent)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            add(s.getsockname()[0])
+    except OSError:
+        pass
+    return found
+
+
+def resolve_allowed_hosts(args: argparse.Namespace) -> list[str]:
+    """Host header allowlist for the web app (DNS-rebinding guard)."""
+    if args.allowed_hosts:
+        hosts = [h.strip() for h in args.allowed_hosts.split(",") if h.strip()]
+        if hosts:
+            return hosts
+    name = socket.gethostname()
+    short = name.split(".")[0]
+    hosts = ["localhost", "127.0.0.1", name, short, f"{short}.local"]
+    hosts += _local_ipv4s()
+    return list(dict.fromkeys(h for h in hosts if h))
 
 
 @dataclass
@@ -229,8 +285,10 @@ def main(argv=None, *, build_fn: Callable[[argparse.Namespace], Runtime] = build
                        is_stopping=lambda: holder.stopping or rt.state.stop.is_set())
         threading.Thread(target=dog.run, args=(rt.state.stop,), name="dogbot-watchdog",
                          daemon=True).start()
-        log.info("DogBot listening on http://%s:%d", args.host, args.port)
-        server_factory(rt.state, args.host, args.port).run()
+        hosts = resolve_allowed_hosts(args)
+        log.info("DogBot listening on http://%s:%d (allowed Host: %s)", args.host, args.port,
+                 ", ".join(hosts))
+        server_factory(rt.state, args.host, args.port, allowed_hosts=hosts).run()
     except KeyboardInterrupt:
         pass                                  # Ctrl-C: uvicorn re-raises it after shutdown
     finally:

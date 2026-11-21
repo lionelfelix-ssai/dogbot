@@ -246,8 +246,12 @@ def test_stop_handler_ignores_repeat_signal(tmp_path):
 class SignalServer:
     """Fake server: once running, SIGTERM arrives (as from systemctl stop)."""
 
-    def __init__(self, state, host, port):
+    created = []
+
+    def __init__(self, state, host, port, allowed_hosts=None):
         self.state = state
+        self.allowed_hosts = allowed_hosts
+        SignalServer.created.append(self)
 
     def run(self):
         assert self.state.pipeline.started.wait(2)
@@ -437,3 +441,56 @@ def test_main_starts_watchdog(tmp_path, monkeypatch):
         svc.main(argv, build_fn=lambda a: svc.build(a, **factories(rec)),
                  server_factory=SignalServer)
     assert len(started) == 1
+
+
+# -- I-5: allowed hosts ---------------------------------------------------------
+
+def test_allowed_hosts_from_cli(monkeypatch):
+    monkeypatch.delenv("DOGBOT_ALLOWED_HOSTS", raising=False)
+    a = svc.parse_args(["--allowed-hosts", "dogbot.lan, 10.0.0.5,,"])
+    assert svc.resolve_allowed_hosts(a) == ["dogbot.lan", "10.0.0.5"]
+
+
+def test_allowed_hosts_from_env(monkeypatch):
+    monkeypatch.setenv("DOGBOT_ALLOWED_HOSTS", "a.example,b.example")
+    assert svc.resolve_allowed_hosts(svc.parse_args([])) == ["a.example", "b.example"]
+
+
+def test_allowed_hosts_default(monkeypatch):
+    monkeypatch.delenv("DOGBOT_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setattr(svc.socket, "gethostname", lambda: "ai-robot")
+    monkeypatch.setattr(svc, "_local_ipv4s", lambda: ["192.168.7.208", "10.1.2.3"])
+    hosts = svc.resolve_allowed_hosts(svc.parse_args([]))
+    for h in ("localhost", "127.0.0.1", "ai-robot", "ai-robot.local",
+              "192.168.7.208", "10.1.2.3"):
+        assert h in hosts
+    assert "*" not in hosts
+    assert len(hosts) == len(set(hosts))
+
+
+def test_local_ipv4s_finds_an_address():
+    ips = svc._local_ipv4s()
+    assert ips and all(ip.count(".") == 3 for ip in ips)
+    assert "0.0.0.0" not in ips
+
+
+def test_hostname_i_parsed_on_linux(monkeypatch):
+    class R:
+        stdout = "192.168.7.208 172.17.0.1 fd00::1 \n"
+
+    monkeypatch.setattr(svc.sys, "platform", "linux")
+    monkeypatch.setattr(svc.subprocess, "run", lambda *a, **k: R())
+    ips = svc._local_ipv4s()
+    assert "192.168.7.208" in ips and "172.17.0.1" in ips
+    assert "fd00::1" not in ips
+
+
+def test_main_always_passes_a_host_list(tmp_path, monkeypatch):
+    monkeypatch.delenv("DOGBOT_ALLOWED_HOSTS", raising=False)
+    SignalServer.created.clear()
+    argv = ["--config", str(tmp_path / "settings.json"), "--data-dir", str(tmp_path / "data")]
+    with pytest.raises(SystemExit):
+        svc.main(argv, build_fn=lambda a: svc.build(a, **factories(Recorder())),
+                 server_factory=SignalServer)
+    hosts = SignalServer.created[0].allowed_hosts
+    assert isinstance(hosts, list) and "localhost" in hosts and "127.0.0.1" in hosts

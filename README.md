@@ -76,7 +76,16 @@ cd /home/admin/dogbot
 
 The service restarts on failure, every 5 s. If the camera or the Hailo cannot
 be opened at startup, the web app is not available and the reason is in
-`journalctl -u dogbot`.
+`journalctl -u dogbot`. A watchdog also exits the service (so systemd restarts
+it) when the camera loop stops updating for 3 s; the app shows FAULT "No data
+from the camera loop" while the status is more than 2 s old.
+
+The web app only answers requests whose `Host` is one of the Pi's own names or
+addresses (localhost, 127.0.0.1, the hostname, `<hostname>.local` and every IPv4
+address at startup), which blocks DNS-rebinding attacks from a LAN browser.
+Anything else gets `400 Invalid host header`. To use another name, pass
+`--allowed-hosts name1,name2` or set `DOGBOT_ALLOWED_HOSTS` (this replaces the
+default list). If the Pi's IP address changes, restart the service.
 
 ### Hailo driver after a kernel update
 
@@ -101,14 +110,18 @@ dog. Everything else (deploy, every API route, the live stream at about 30 fps,
 1. **Plug in the USB speaker.** Run `aplay -l` on the Pi and find its card name,
    for example `card 2: Device [USB Audio Device]` → `Device`.
 2. **Set `audio_device`** in the app's settings to `plughw:CARD=<name>,DEV=0`,
-   for example `plughw:CARD=Device,DEV=0`. Do not keep `"default"`. On this Pi
-   `default` is PulseAudio, which the service cannot reach (it runs without a
-   desktop session), so nothing plays. If the speaker has a volume control,
+   for example `plughw:CARD=Device,DEV=0`. Do not keep `"default"` or
+   `"sysdefault"`. On this Pi `default` is PulseAudio, which the service cannot
+   reach (it runs without a desktop session), so nothing plays. Only plain ALSA
+   names are accepted: `default`, `sysdefault[:CARD=x]` and
+   `[plug]hw:[CARD=]x[,[DEV=]n]`. If the speaker has a volume control,
    set it to maximum with `alsamixer -c <name>` and keep the loudness in the
    app's levels.
-3. **Check that you actually hear a test blast.** Press Test on the L1 row. A test blast reports OK as soon as
-   it starts `aplay`. It does not detect a wrong device or a missing speaker,
-   so the app can say OK while nothing plays.
+3. **Check that you actually hear a test blast.** Press Test on the L1 row. If
+   `aplay` fails at once (no such device, device busy), the test blast reports
+   the error, and every `aplay` failure is logged as a `sound` error event. A
+   device that opens but has no speaker attached, or a muted mixer, still
+   reports OK while nothing plays.
 4. **Calibrate L1–L3.** Hold a phone SPL meter app where the dogs lie on the
    couch. Press Test on the L1, L2 and L3 rows, adjust the levels (software gain 0–1) until
    they sound right, and enter the measured dB for each level.

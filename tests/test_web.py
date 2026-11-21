@@ -559,3 +559,37 @@ def test_good_settings_file_at_startup_logs_nothing(rig):
     assert state.load_error is None
     assert state.get_settings().zone == ZONE
     assert "error" not in rig.kinds()
+
+
+# -- I-5: Host-header check against DNS rebinding -----------------------------
+
+def _client_for(state, host):
+    return TestClient(create_app(state, allowed_hosts=["dogbot.local", "192.168.7.208"]),
+                      base_url=f"http://{host}")
+
+
+@pytest.mark.parametrize("path", ["/api/status", "/api/settings", "/"])
+def test_evil_host_rejected(rig, path):
+    r = _client_for(rig.state, "evil.example").get(path)
+    assert r.status_code == 400
+
+
+def test_evil_host_cannot_change_settings_or_blast(rig):
+    c = _client_for(rig.state, "evil.example")
+    assert c.put("/api/settings", json={"tone_hz": 3000}).status_code == 400
+    assert c.post("/api/test-blast", json={"level": 3}).status_code == 400
+    assert rig.sound.cmds == []
+    assert rig.state.get_settings().tone_hz == 4000
+
+
+@pytest.mark.parametrize("host", ["dogbot.local", "192.168.7.208", "192.168.7.208:8080"])
+def test_allowed_host_ok(rig, host):
+    assert _client_for(rig.state, host).get("/api/status").status_code == 200
+
+
+def test_make_server_passes_allowed_hosts(rig):
+    from dogbot.web.app import make_server
+
+    server = make_server(rig.state, "127.0.0.1", 0, allowed_hosts=["dogbot.local"])
+    c = TestClient(server.config.app, base_url="http://evil.example")
+    assert c.get("/api/status").status_code == 400
