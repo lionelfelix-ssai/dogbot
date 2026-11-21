@@ -185,14 +185,14 @@ def test_unreadable_file_not_renamed(tmp_path, monkeypatch):
     from dogbot.config import load_settings_checked
     p = tmp_path / "settings.json"
     save_settings(Settings(rearm_grace_s=30, zone=[(0.1, 0.1), (0.9, 0.1), (0.5, 0.9)]), p)
-    real = Path.read_text
+    real = Path.read_bytes
 
-    def read_text(self, *a, **k):
+    def read_bytes(self):
         if self == p:
             raise PermissionError(13, "Permission denied", str(self))
-        return real(self, *a, **k)
+        return real(self)
 
-    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
     s, reason = load_settings_checked(p)
     assert s == Settings()
     assert reason and "unreadable" in reason
@@ -200,3 +200,14 @@ def test_unreadable_file_not_renamed(tmp_path, monkeypatch):
     assert list(tmp_path.glob("settings.json.invalid-*")) == []
     monkeypatch.undo()
     assert load_settings_checked(p)[0].rearm_grace_s == 30   # intact for next start
+
+
+def test_non_utf8_file_moved_aside(tmp_path):
+    from dogbot.config import load_settings_checked
+    p = tmp_path / "settings.json"
+    p.write_bytes(b"\xff\xfe{")
+    s, reason = load_settings_checked(p)
+    assert s == Settings() and reason
+    assert not p.exists()
+    moved = list(tmp_path.glob("settings.json.invalid-*"))
+    assert len(moved) == 1 and moved[0].read_bytes() == b"\xff\xfe{"

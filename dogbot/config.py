@@ -110,8 +110,8 @@ def settings_path() -> Path:
     return Path(os.environ.get("DOGBOT_CONFIG", "config/settings.json"))
 
 
-def _parse_settings(text: str) -> Settings:
-    data = json.loads(text)
+def _parse_settings(raw: bytes) -> Settings:
+    data = json.loads(raw.decode("utf-8"))  # UnicodeDecodeError = corrupt content
     if not isinstance(data, dict):
         raise ValueError("settings file must hold a JSON object")
     known = {f.name for f in fields(Settings)}
@@ -143,13 +143,13 @@ def load_settings_checked(path: Path) -> tuple[Settings, str | None]:
     if not path.exists():
         return Settings(), None
     try:
-        text = path.read_text()
+        raw = path.read_bytes()   # only I/O errors here; decoding is parsing
     except OSError as e:
         reason = f"settings file unreadable: {path.name}: {e} (left in place; using defaults)"
         log.error("%s", reason)
         return Settings(), reason
     try:
-        return _parse_settings(text), None
+        return _parse_settings(raw), None
     except Exception as e:  # JSON, types, ranges: all mean "unusable file"
         reason = f"{path.name}: {type(e).__name__}: {e}"
     moved = path.with_name(f"{path.name}.invalid-{int(time.time())}")
