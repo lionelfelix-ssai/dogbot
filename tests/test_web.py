@@ -148,6 +148,8 @@ def test_get_settings(rig):
     {"level_db": {"2": "loud"}},
     {"enabled": "yes"},
     {"audio_device": ""},
+    {"audio_device": "file:'|touch /tmp/pwned'"},   # C-1: alsa file plugin -> shell
+    {"audio_device": "hw:1,0 |sh"},
     {"bogus": 1},                       # unknown key
     {"zone": [[0, 0], [1, 0], [1, 1]]},  # zone only via /api/zone
     {"dog_conf": 0.6, "bogus": 1},      # one bad key spoils the update

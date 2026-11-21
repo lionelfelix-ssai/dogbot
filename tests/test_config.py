@@ -211,3 +211,50 @@ def test_non_utf8_file_moved_aside(tmp_path):
     assert not p.exists()
     moved = list(tmp_path.glob("settings.json.invalid-*"))
     assert len(moved) == 1 and moved[0].read_bytes() == b"\xff\xfe{"
+
+
+# -- C-1: audio_device reaches `aplay -D`; only plain ALSA names allowed -------
+
+@pytest.mark.parametrize("dev", [
+    "file:'|touch /tmp/pwned'",
+    "file:/tmp/x.raw",
+    "|touch /tmp/pwned",
+    "plug:'|sh'",
+    "hw:'1'",
+    'hw:"1"',
+    "hw:1,0;sh",
+    "/dev/snd/pcmC1D0p",
+    "hw:CARD=a/b",
+    "default ",
+    " default",
+    "plughw:CARD=Device, DEV=0",
+    "hw:1,0\n",
+    "pulse",
+    "dmix",
+    "sysdefault:CARD=",
+    "hw:",
+])
+def test_audio_device_rejects_unsafe_names(dev):
+    with pytest.raises(ValueError, match="audio_device"):
+        Settings(audio_device=dev).validate()
+
+
+@pytest.mark.parametrize("dev", [
+    "default", "sysdefault", "sysdefault:CARD=Device", "plughw:CARD=Device,DEV=0",
+    "hw:1,0", "hw:1", "plughw:1,0", "hw:CARD=Device", "plughw:CARD=Device,0",
+])
+def test_audio_device_accepts_alsa_names(dev):
+    Settings(audio_device=dev).validate()
+
+
+def test_planted_audio_device_in_file_rejected_at_load(tmp_path):
+    from dogbot.config import load_settings_checked
+    p = tmp_path / "s.json"
+    p.write_text('{"audio_device": "file:\'|touch /tmp/pwned\'"}')
+    s, reason = load_settings_checked(p)
+    assert reason and "audio_device" in reason
+    assert s.audio_device == Settings().audio_device
+
+
+def test_default_audio_device_is_sysdefault():
+    assert Settings().audio_device == "sysdefault"

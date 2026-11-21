@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field, fields
@@ -36,7 +37,7 @@ class Settings:
     level_db: dict[int, float | None] = field(default_factory=_level_db)
     sequences: int = 2
     enabled: bool = True
-    audio_device: str = "default"
+    audio_device: str = "sysdefault"
     zone: list[tuple[float, float]] = field(default_factory=list)
 
     def validate(self) -> None:
@@ -66,14 +67,24 @@ class Settings:
                 _check_number(f"level {k} dB", db)
         if not isinstance(self.enabled, bool):
             raise ValueError("enabled must be true or false")
-        if not isinstance(self.audio_device, str) or not self.audio_device.strip():
-            raise ValueError("audio_device must be a non-empty string")
+        if (not isinstance(self.audio_device, str)
+                or not AUDIO_DEVICE_RE.fullmatch(self.audio_device)):
+            raise ValueError(
+                "audio_device must be a plain ALSA device name like 'sysdefault', "
+                f"'hw:1,0' or 'plughw:CARD=Device,DEV=0', got {self.audio_device!r}")
         validate_zone(self.zone)
 
 
 LEVEL_KEYS = {1, 2, 3}
 MIN_REARM_GRACE_S = 5.0
 MIN_TONE_HZ, MAX_TONE_HZ = 200.0, 20000.0
+
+# audio_device is passed to `aplay -D`. alsa-lib PCM names can carry plugin
+# arguments (e.g. `file:'|cmd'` pipes audio into a shell command), so only
+# plain hardware/default names are accepted, from the web and from the file.
+AUDIO_DEVICE_RE = re.compile(
+    r"(default|sysdefault(:CARD=\w+)?|(plug)?hw:(CARD=)?\w+(,(DEV=)?\d+)?)",
+    re.ASCII)
 
 
 def _check_number(name: str, v) -> None:
