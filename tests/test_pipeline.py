@@ -391,3 +391,16 @@ def test_extra_presence_never_blasts_with_zero_grace(rig):
     assert rig.plays() == []
     st = rig.pipe.status()
     assert st["armed"] is False and st["people"] == 0
+
+
+def test_raw_jpeg_is_the_unannotated_frame(rig):
+    import cv2
+    assert rig.pipe.raw_jpeg() is None
+    rig.source.main[:] = 200
+    rig.run(DT * 2, [])
+    raw = cv2.imdecode(np.frombuffer(rig.pipe.raw_jpeg(), np.uint8), cv2.IMREAD_COLOR)
+    annotated = cv2.imdecode(np.frombuffer(rig.pipe.latest_jpeg(), np.uint8),
+                             cv2.IMREAD_COLOR)
+    assert raw.shape == rig.source.main.shape
+    assert np.abs(raw.astype(int) - 200).max() <= 3    # no banner, no zone
+    assert np.abs(annotated.astype(int) - 200).max() > 50

@@ -158,6 +158,16 @@ class Pipeline:
     def latest_jpeg(self) -> bytes | None:
         return self._jpeg
 
+    def raw_jpeg(self) -> bytes | None:
+        """The last camera frame without overlay, JPEG-encoded on demand (for
+        the zone editor). Safe from another thread: each capture is a new
+        array and the reference is swapped whole."""
+        frame = self._last_frame
+        if frame is None:
+            return None
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        return buf.tobytes() if ok else None
+
     def status(self) -> dict:
         return dict(self._status)
 
