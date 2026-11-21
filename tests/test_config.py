@@ -111,7 +111,7 @@ def test_validate_rejects_bad_values(kwargs):
     {"rearm_grace_s": 5},
     {"tone_hz": 200},
     {"tone_hz": 20000},
-    {"dwell_s": 0, "clear_s": 0, "round_gap_s": 0, "blast_spacing_s": 0},
+    {"dwell_s": 0, "clear_s": 0, "round_gap_s": 0.5, "blast_spacing_s": 0},
     {"dog_conf": 1, "person_conf": 0},          # ints are fine for floats
     {"sequences": 1},
     {"levels": {1: 0, 2: 0.5, 3: 1}},
@@ -258,3 +258,23 @@ def test_planted_audio_device_in_file_rejected_at_load(tmp_path):
 
 def test_default_audio_device_is_sysdefault():
     assert Settings().audio_device == "sysdefault"
+
+
+# -- I-4: upper caps (and round_gap_s >= 0.5) --------------------------------
+
+@pytest.mark.parametrize("name,limit", [
+    ("blast_s", 3), ("blast_spacing_s", 5), ("round_gap_s", 120), ("sequences", 5),
+    ("dwell_s", 60), ("clear_s", 3600), ("rearm_grace_s", 3600),
+])
+def test_upper_caps(name, limit):
+    Settings(**{name: limit}).validate()                     # the cap itself is fine
+    over = limit + 1 if name == "sequences" else limit + 0.01
+    with pytest.raises(ValueError, match=name):
+        Settings(**{name: over}).validate()
+
+
+def test_round_gap_minimum():
+    Settings(round_gap_s=0.5).validate()
+    for v in (0, 0.49):
+        with pytest.raises(ValueError, match="round_gap_s"):
+            Settings(round_gap_s=v).validate()

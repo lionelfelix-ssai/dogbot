@@ -48,14 +48,12 @@ class Settings:
         can never hide a person who just stepped out of view."""
         for name in ("dog_conf", "person_conf"):
             _check_range(name, getattr(self, name), 0.0, 1.0)
-        for name in ("dwell_s", "clear_s", "round_gap_s", "blast_s",
-                     "blast_spacing_s"):
-            _check_range(name, getattr(self, name), 0.0, None)
-        _check_range("rearm_grace_s", self.rearm_grace_s, MIN_REARM_GRACE_S, None)
+        for name, (lo, hi) in TIMING_RANGES.items():
+            _check_range(name, getattr(self, name), lo, hi)
         _check_range("tone_hz", self.tone_hz, MIN_TONE_HZ, MAX_TONE_HZ)
         if (not isinstance(self.sequences, int) or isinstance(self.sequences, bool)
-                or self.sequences < 1):
-            raise ValueError("sequences must be an integer >= 1")
+                or not 1 <= self.sequences <= MAX_SEQUENCES):
+            raise ValueError(f"sequences must be an integer from 1 to {MAX_SEQUENCES}")
         if not isinstance(self.levels, dict) or set(self.levels) != LEVEL_KEYS:
             raise ValueError("levels must have exactly the keys 1, 2, 3")
         for k, g in self.levels.items():
@@ -78,6 +76,18 @@ class Settings:
 LEVEL_KEYS = {1, 2, 3}
 MIN_REARM_GRACE_S = 5.0
 MIN_TONE_HZ, MAX_TONE_HZ = 200.0, 20000.0
+MAX_SEQUENCES = 5
+# (min, max) seconds. Caps keep a typo from producing minutes of sound or a
+# guard that never re-arms; round_gap_s >= 0.5 so back-to-back rounds never
+# cut each other off.
+TIMING_RANGES = {
+    "dwell_s": (0.0, 60.0),
+    "clear_s": (0.0, 3600.0),
+    "round_gap_s": (0.5, 120.0),
+    "blast_s": (0.0, 3.0),
+    "blast_spacing_s": (0.0, 5.0),
+    "rearm_grace_s": (MIN_REARM_GRACE_S, 3600.0),
+}
 
 # audio_device is passed to `aplay -D`. alsa-lib PCM names can carry plugin
 # arguments (e.g. `file:'|cmd'` pipes audio into a shell command), so only
