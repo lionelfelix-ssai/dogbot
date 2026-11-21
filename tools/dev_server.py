@@ -21,7 +21,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from dogbot.config import Settings, load_settings, save_settings
+from dogbot.config import Settings, save_settings
 from dogbot.detection import Detection
 from dogbot.events import EventStore
 from dogbot.overlay import TrackedDet, draw_overlay
@@ -195,8 +195,7 @@ def main(argv=None):
         save_settings(Settings(zone=list(DEFAULT_ZONE)), path)
     events = EventStore(base / "events.db", base / "snapshots")
     events.log("startup", {"dev": True})
-    state = AppState(settings=load_settings(path), settings_path=path,
-                     pipeline=None, events=events, sound=PrintSound())
+    state = AppState.from_path(path, events=events, sound=PrintSound())
     state.pipeline = SimPipeline(state, fault=args.fault)
     sim = threading.Thread(target=state.pipeline.run, args=(state.stop,), daemon=True)
     sim.start()

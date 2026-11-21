@@ -20,7 +20,7 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from dogbot.config import Settings, save_settings, validate_zone
+from dogbot.config import Settings, load_settings_checked, save_settings, validate_zone
 from dogbot.rules import PlayBlasts
 
 log = logging.getLogger(__name__)
@@ -46,6 +46,18 @@ class AppState:
     sound: Any
     lock: threading.Lock = field(default_factory=threading.Lock)
     stop: threading.Event = field(default_factory=threading.Event)
+    load_error: str | None = None
+
+    @classmethod
+    def from_path(cls, settings_path: Path, events, sound=None, pipeline=None) -> "AppState":
+        """Startup path: load settings with validation. A bad file falls back
+        to defaults (see load_settings_checked) and logs an `error` event.
+        Wire the pipeline and sound with `state.get_settings` afterwards."""
+        settings, reason = load_settings_checked(settings_path)
+        if reason is not None:
+            events.log("error", {"source": "settings", "reason": reason})
+        return cls(settings=settings, settings_path=Path(settings_path),
+                   pipeline=pipeline, events=events, sound=sound, load_error=reason)
 
     def get_settings(self) -> Settings:
         """The current Settings object; pass this as `settings_getter`."""

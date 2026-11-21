@@ -438,3 +438,29 @@ def test_make_server_exit_ends_streams(rig):
     assert not rig.state.stop.is_set()
     server.handle_exit(signal.SIGINT, None)
     assert rig.state.stop.is_set() and server.should_exit
+
+
+def test_bad_settings_file_at_startup_falls_back_and_guard_can_be_disabled(tmp_path):
+    path = tmp_path / "config" / "settings.json"
+    path.parent.mkdir()
+    path.write_text('{"rearm_grace_s": 0}')
+    events = EventStore(tmp_path / "events.db", tmp_path / "snaps")
+    state = AppState.from_path(path, events=events, sound=FakeSound())
+    state.pipeline = FakePipeline(state.get_settings)
+    assert state.get_settings() == Settings()
+    assert state.load_error and "rearm_grace_s" in state.load_error
+    err = events.list(kinds={"error"})
+    assert len(err) == 1 and err[0]["detail"]["source"] == "settings"
+    assert "rearm_grace_s" in err[0]["detail"]["reason"]
+    client = TestClient(create_app(state))
+    r = client.post("/api/enabled", json={"enabled": False})
+    assert r.status_code == 200
+    assert load_settings(path).enabled is False
+    assert list(path.parent.glob("settings.json.invalid-*"))
+
+
+def test_good_settings_file_at_startup_logs_nothing(rig):
+    state = AppState.from_path(rig.path, events=rig.events, sound=rig.sound)
+    assert state.load_error is None
+    assert state.get_settings().zone == ZONE
+    assert "error" not in rig.kinds()

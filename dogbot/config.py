@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import tempfile
+import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 def _levels() -> dict[int, float]:
@@ -106,19 +110,51 @@ def settings_path() -> Path:
     return Path(os.environ.get("DOGBOT_CONFIG", "config/settings.json"))
 
 
-def load_settings(path: Path) -> Settings:
-    path = Path(path)
-    if not path.exists():
-        return Settings()
+def _parse_settings(path: Path) -> Settings:
     data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError("settings file must hold a JSON object")
     known = {f.name for f in fields(Settings)}
     data = {k: v for k, v in data.items() if k in known}
     for key in ("levels", "level_db"):
         if key in data:
+            if not isinstance(data[key], dict):
+                raise ValueError(f"{key} must be an object")
             data[key] = {int(k): v for k, v in data[key].items()}
     if "zone" in data:
+        if not isinstance(data["zone"], list):
+            raise ValueError("zone must be a list")
         data["zone"] = [tuple(p) for p in data["zone"]]
-    return Settings(**data)
+    s = Settings(**data)
+    s.validate()
+    return s
+
+
+def load_settings_checked(path: Path) -> tuple[Settings, str | None]:
+    """-> (settings, reason). A missing file gives defaults and no reason.
+    A file that is corrupt or fails validate() is renamed to
+    `<name>.invalid-<epoch>` (kept for inspection) and defaults are returned
+    with the reason, so a bad file can never run the pipeline or lock the
+    owner out of saving (every save validates the whole object)."""
+    path = Path(path)
+    if not path.exists():
+        return Settings(), None
+    try:
+        return _parse_settings(path), None
+    except Exception as e:  # JSON, types, ranges: all mean "unusable file"
+        reason = f"{path.name}: {type(e).__name__}: {e}"
+    moved = path.with_name(f"{path.name}.invalid-{int(time.time())}")
+    try:
+        os.replace(path, moved)
+        reason += f" (moved to {moved.name}; using defaults)"
+    except OSError as e:
+        reason += f" (could not move it aside: {e}; using defaults)"
+    log.error("settings file rejected: %s", reason)
+    return Settings(), reason
+
+
+def load_settings(path: Path) -> Settings:
+    return load_settings_checked(path)[0]
 
 
 def save_settings(s: Settings, path: Path) -> None:

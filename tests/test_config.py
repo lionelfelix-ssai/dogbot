@@ -123,3 +123,57 @@ def test_validate_rejects_bad_values(kwargs):
 ])
 def test_validate_accepts_good_values(kwargs):
     Settings(**kwargs).validate()
+
+
+# -- R14: validate on load, fall back to defaults ------------------------------
+
+def test_missing_file_is_not_an_error(tmp_path):
+    from dogbot.config import load_settings_checked
+    s, reason = load_settings_checked(tmp_path / "nope.json")
+    assert s == Settings() and reason is None
+
+
+def test_valid_file_loads_without_reason(tmp_path):
+    from dogbot.config import load_settings_checked
+    p = tmp_path / "s.json"
+    save_settings(Settings(rearm_grace_s=30), p)
+    s, reason = load_settings_checked(p)
+    assert s.rearm_grace_s == 30 and reason is None
+    assert p.exists()
+
+
+def test_invalid_file_falls_back_to_defaults_and_is_renamed(tmp_path):
+    from dogbot.config import load_settings_checked
+    p = tmp_path / "settings.json"
+    p.write_text('{"rearm_grace_s": 0}')
+    s, reason = load_settings_checked(p)
+    assert s == Settings()
+    assert reason and "rearm_grace_s" in reason
+    assert not p.exists()
+    moved = list(tmp_path.glob("settings.json.invalid-*"))
+    assert len(moved) == 1 and moved[0].read_text() == '{"rearm_grace_s": 0}'
+    assert load_settings(p) == Settings()      # plain wrapper agrees
+
+
+@pytest.mark.parametrize("text", [
+    "{not json",
+    "[1, 2, 3]",
+    '{"levels": {"one": 0.4}}',
+    '{"levels": 5}',
+    '{"zone": [5, 6, 7]}',
+    '{"dog_conf": "high"}',
+])
+def test_corrupt_json_falls_back(tmp_path, text):
+    from dogbot.config import load_settings_checked
+    p = tmp_path / "settings.json"
+    p.write_text(text)
+    s, reason = load_settings_checked(p)
+    assert s == Settings() and reason
+    assert not p.exists()
+    assert len(list(tmp_path.glob("settings.json.invalid-*"))) == 1
+
+
+def test_load_settings_keeps_signature(tmp_path):
+    p = tmp_path / "settings.json"
+    p.write_text('{"tone_hz": 50000}')
+    assert load_settings(p) == Settings()
