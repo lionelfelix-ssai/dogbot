@@ -14,7 +14,23 @@ States::
     paused     --occupied-->                 gap (gap restarts at now)
     paused     --!occupied for clear_s-->    idle + cleared
     unresolved --!occupied for clear_s-->    idle + cleared (timer resets if the dog returns)
-    any non-idle --!active-->                idle + StopSound + stopped
+    blasting   --!active-->                  held + StopSound + stopped   (ruling R8)
+    gap/paused --!active-->                  held + StopSound
+    unresolved --!active-->                  unresolved (nothing emitted)
+    held       (inactive)                    no commands
+    held       --active & occupied-->        gap (gap_end = now + round_gap_s),
+                                             or unresolved + unresolved if the kept
+                                             position is the final round
+    held       --!occupied for clear_s-->    idle + cleared (counted active or not)
+
+`held` keeps round and sequence, so a flapping `active` signal (fault
+recovery, enable toggles, disarm/rearm) can never restart escalation at
+round 1 or skip the gap; the sequences cap and unresolved silence hold.
+In `held` and `unresolved`, the clear timer needs clear_s of *continuous*
+non-occupancy and runs whether or not the guard is active.
+
+Time: `now` must be monotonic (e.g. time.monotonic()); wall-clock jumps
+would break every deadline.
 
 Round n of each sequence plays n blasts at level n (n = 1, 2, 3).
 Round duration = count*blast_s + (count-1)*blast_spacing_s; the gap
@@ -86,23 +102,56 @@ class CouchGuard:
         cmds.append(PlayBlasts(count=rnd, level=rnd))
         events.append(RuleEvent("round", {"sequence": sequence, "round": rnd}))
 
+    def _track_clear(self, now: float, occupied: bool,
+                     events: list) -> bool:
+        """Count continuous non-occupancy; on clear_s emit `cleared`, go idle.
+        Returns True if the guard was cleared."""
+        if occupied:
+            self._clear_since = None
+            return False
+        if self._clear_since is None:
+            self._clear_since = now
+        if now - self._clear_since + _EPS >= self.settings.clear_s:
+            events.append(RuleEvent("cleared", {}))
+            self._reset()
+            return True
+        return False
+
     def _is_final_round(self) -> bool:
         return (self.round >= ROUNDS_PER_SEQUENCE
                 and self.sequence >= self.settings.sequences)
 
     def update(self, now: float, active: bool,
                occupied: bool) -> tuple[list[Command], list[RuleEvent]]:
-        """Advance the machine. `active` = enabled and armed and not fault;
-        `occupied` = dwell-confirmed dog presence in the couch zone."""
+        """Advance the machine. `now` = monotonic seconds; `active` = enabled
+        and armed and not fault; `occupied` = dwell-confirmed dog presence
+        in the couch zone."""
         cmds: list[Command] = []
         events: list[RuleEvent] = []
 
         if not active:
-            if self.state != "idle":
+            if self.state in ("blasting", "gap", "paused"):
                 cmds.append(StopSound())
-                events.append(RuleEvent("stopped", {"reason": "inactive"}))
-                self._reset()
+                if self.state == "blasting":
+                    events.append(RuleEvent("stopped", {"reason": "inactive"}))
+                self.state = "held"
+                # keep a running clear timer from `paused`
+            if self.state in ("held", "unresolved"):
+                self._track_clear(now, occupied, events)
             return cmds, events
+
+        if self.state == "held":
+            if self._track_clear(now, occupied, events):
+                return cmds, events
+            if not occupied:
+                return cmds, events
+            if self._is_final_round():
+                self.state = "unresolved"
+                events.append(RuleEvent("unresolved",
+                                        {"sequences": self.settings.sequences}))
+                return cmds, events
+            self.state = "gap"
+            self._gap_end = now + self.settings.round_gap_s
 
         if self.state == "idle":
             if occupied:
@@ -128,14 +177,7 @@ class CouchGuard:
                 return cmds, events
 
         if self.state == "unresolved":
-            if occupied:
-                self._clear_since = None
-            else:
-                if self._clear_since is None:
-                    self._clear_since = now
-                if now - self._clear_since + _EPS >= self.settings.clear_s:
-                    events.append(RuleEvent("cleared", {}))
-                    self._reset()
+            self._track_clear(now, occupied, events)
             return cmds, events
 
         if self.state == "blasting" and now + _EPS >= self._round_end:
