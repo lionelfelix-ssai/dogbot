@@ -1,10 +1,12 @@
+import pytest
+
 from dogbot.zones import CouchPresence, anchor, point_in_polygon
 
 SQUARE = [(0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8)]
 
 
 def test_anchor_bottom_center():
-    assert anchor((0.2, 0.2, 0.4, 0.6)) == (0.3, 0.6)
+    assert anchor((0.2, 0.2, 0.4, 0.6)) == pytest.approx((0.3, 0.6))
 
 
 def test_point_in_square():
