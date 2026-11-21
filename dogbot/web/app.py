@@ -210,10 +210,22 @@ def create_app(state: AppState) -> FastAPI:
             log.exception("saving settings failed")
             raise HTTPException(500, f"could not save settings: {e}") from None
 
+    def cut_sound() -> None:
+        """Off means quiet now: also cut a running test blast, which the
+        pipeline (it only stops what it started) would let finish."""
+        if state.sound is None:
+            return
+        try:
+            state.sound.stop()
+        except Exception:
+            log.exception("sound stop on disable failed")
+
     @app.put("/api/settings")
     def put_settings(payload: Any = Body(...)):
         payload = _require_obj(payload)
         old, new = apply(lambda cur: _merge_settings(cur, payload))
+        if payload.get("enabled") is False:
+            cut_sound()
         changed = _changed(old, new)
         if changed:
             state.events.log("settings", {"changed": changed})
@@ -241,6 +253,8 @@ def create_app(state: AppState) -> FastAPI:
         if not isinstance(enabled, bool):
             raise HTTPException(422, "enabled must be true or false")
         old, _ = apply(lambda cur: replace(cur, enabled=enabled))
+        if not enabled:
+            cut_sound()
         if old.enabled != enabled:
             state.events.log("enabled" if enabled else "disabled", {})
         return status()

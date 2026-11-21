@@ -699,7 +699,7 @@ function fmtDetail(kind, d) {
     }
     case "error":
       if (d.recovered) return `${d.source || "system"} recovered`;
-      return `${d.source || "system"}: ${d.error || ""}`;
+      return `${d.source || "system"}: ${d.error || d.reason || ""}`;
     default: {
       const keys = Object.keys(d);
       return keys.length ? JSON.stringify(d) : "";

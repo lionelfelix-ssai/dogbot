@@ -244,6 +244,31 @@ def test_disable_shows_in_status_and_logs(rig):
     assert rig.kinds()[0] == "enabled"
 
 
+def test_disable_cuts_running_sound(rig):
+    rig.client.post("/api/test-blast", json={"level": 3})
+    rig.sound.cmds.clear()
+    assert rig.client.post("/api/enabled", json={"enabled": False}).status_code == 200
+    assert rig.sound.cmds == [StopSound()]
+
+
+def test_disable_via_settings_also_cuts_sound(rig):
+    rig.sound.cmds.clear()
+    assert rig.client.put("/api/settings", json={"enabled": False}).status_code == 200
+    assert rig.sound.cmds == [StopSound()]
+
+
+def test_enable_does_not_touch_sound(rig):
+    rig.client.post("/api/enabled", json={"enabled": False})
+    rig.sound.cmds.clear()
+    rig.client.post("/api/enabled", json={"enabled": True})
+    assert rig.sound.cmds == []
+
+
+def test_disable_without_sound_is_fine(rig):
+    rig.state.sound = None
+    assert rig.client.post("/api/enabled", json={"enabled": False}).status_code == 200
+
+
 @pytest.mark.parametrize("payload", [{"enabled": "false"}, {"enabled": 0}, {}])
 def test_enabled_must_be_bool(rig, payload):
     assert rig.client.post("/api/enabled", json=payload).status_code == 422
