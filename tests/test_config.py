@@ -177,3 +177,26 @@ def test_load_settings_keeps_signature(tmp_path):
     p = tmp_path / "settings.json"
     p.write_text('{"tone_hz": 50000}')
     assert load_settings(p) == Settings()
+
+
+def test_unreadable_file_not_renamed(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from dogbot.config import load_settings_checked
+    p = tmp_path / "settings.json"
+    save_settings(Settings(rearm_grace_s=30, zone=[(0.1, 0.1), (0.9, 0.1), (0.5, 0.9)]), p)
+    real = Path.read_text
+
+    def read_text(self, *a, **k):
+        if self == p:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    s, reason = load_settings_checked(p)
+    assert s == Settings()
+    assert reason and "unreadable" in reason
+    assert p.exists()
+    assert list(tmp_path.glob("settings.json.invalid-*")) == []
+    monkeypatch.undo()
+    assert load_settings_checked(p)[0].rearm_grace_s == 30   # intact for next start

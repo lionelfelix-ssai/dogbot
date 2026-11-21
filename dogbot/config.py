@@ -110,8 +110,8 @@ def settings_path() -> Path:
     return Path(os.environ.get("DOGBOT_CONFIG", "config/settings.json"))
 
 
-def _parse_settings(path: Path) -> Settings:
-    data = json.loads(path.read_text())
+def _parse_settings(text: str) -> Settings:
+    data = json.loads(text)
     if not isinstance(data, dict):
         raise ValueError("settings file must hold a JSON object")
     known = {f.name for f in fields(Settings)}
@@ -135,12 +135,21 @@ def load_settings_checked(path: Path) -> tuple[Settings, str | None]:
     A file that is corrupt or fails validate() is renamed to
     `<name>.invalid-<epoch>` (kept for inspection) and defaults are returned
     with the reason, so a bad file can never run the pipeline or lock the
-    owner out of saving (every save validates the whole object)."""
+    owner out of saving (every save validates the whole object).
+
+    A file that can't be *read* (permissions, I/O error) is left in place:
+    its content may be fine, so defaults are used for this run only."""
     path = Path(path)
     if not path.exists():
         return Settings(), None
     try:
-        return _parse_settings(path), None
+        text = path.read_text()
+    except OSError as e:
+        reason = f"settings file unreadable: {path.name}: {e} (left in place; using defaults)"
+        log.error("%s", reason)
+        return Settings(), reason
+    try:
+        return _parse_settings(text), None
     except Exception as e:  # JSON, types, ranges: all mean "unusable file"
         reason = f"{path.name}: {type(e).__name__}: {e}"
     moved = path.with_name(f"{path.name}.invalid-{int(time.time())}")
