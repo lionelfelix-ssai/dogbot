@@ -50,10 +50,12 @@ class FakeDetector:
 
 
 class FakeSound:
-    def __init__(self, rec, settings_getter):
+    def __init__(self, rec, settings_getter, on_error=None):
         self.rec = rec
         self.settings_getter = settings_getter
+        self.on_error = on_error
         self.handled = []
+        self.last_error = None
 
     def handle(self, cmd):
         self.handled.append(cmd)
@@ -97,7 +99,7 @@ def factories(rec):
     return dict(
         make_source=lambda lens_position=None: FakeSource(rec, lens_position),
         make_detector=lambda hef: FakeDetector(rec, hef),
-        make_sound=lambda getter: FakeSound(rec, getter),
+        make_sound=lambda getter, on_error=None: FakeSound(rec, getter, on_error),
         make_pipeline=lambda *a, **k: FakePipeline(rec, *a, **k),
     )
 
@@ -153,6 +155,25 @@ def test_build_wires_real_parts_with_live_settings(tmp_path):
     rt.state.update_settings(lambda s: Settings(**{**s.__dict__, "tone_hz": 3000.0}))
     assert p.settings_getter().tone_hz == 3000.0
     assert rt.sound.settings_getter().tone_hz == 3000.0
+
+
+def test_sound_errors_become_error_events(tmp_path, caplog):
+    rt = svc.build(args_for(tmp_path), **factories(Recorder()))
+    assert rt.sound.on_error is not None
+    rt.sound.on_error({"error": "aplay exit 1: no device", "device": "sysdefault",
+                       "returncode": 1})
+    err = rt.events.list(kinds={"error"})
+    assert len(err) == 1
+    assert err[0]["detail"] == {"source": "sound", "error": "aplay exit 1: no device",
+                                "device": "sysdefault", "returncode": 1}
+    assert "aplay exit 1" in caplog.text
+
+
+def test_real_sound_gets_on_error(tmp_path):
+    from dogbot.actions.sound import SoundAction
+    cb = lambda d: None  # noqa: E731
+    snd = svc._real_sound(lambda: None, on_error=cb)
+    assert isinstance(snd, SoundAction) and snd._on_error is cb
 
 
 def test_build_logs_startup_event(tmp_path):

@@ -266,6 +266,58 @@ def test_test_blast_bad_level(rig, payload):
     assert rig.sound.cmds == []
 
 
+class FailingAplaySound(FakeSound):
+    """Like SoundAction: handle() returns at once; aplay fails a moment later
+    and the writer thread sets last_error."""
+
+    def __init__(self, delay=0.05, err=None):
+        super().__init__()
+        self.last_error = None
+        self.delay = delay
+        self.err = err
+
+    def handle(self, cmd):
+        super().handle(cmd)
+        if self.err is not None:
+            threading.Timer(self.delay, lambda: setattr(self, "last_error", self.err)).start()
+
+
+APLAY_ERR = {"error": "aplay exit 1: aplay: main:850: audio open error: No such device",
+             "device": "sysdefault", "returncode": 1}
+
+
+def test_test_blast_early_aplay_failure_is_503(rig):
+    rig.state.sound = FailingAplaySound(err=APLAY_ERR)
+    r = rig.client.post("/api/test-blast", json={"level": 2})
+    assert r.status_code == 503
+    assert "audio open error" in r.json()["detail"]
+    assert "test_blast" not in rig.kinds()
+
+
+def test_test_blast_ok_when_aplay_keeps_running(rig):
+    rig.state.sound = FailingAplaySound(err=None)
+    t0 = time.monotonic()
+    r = rig.client.post("/api/test-blast", json={"level": 2})
+    assert r.status_code == 200
+    assert time.monotonic() - t0 < 1.0
+    assert "test_blast" in rig.kinds()
+
+
+def test_test_blast_ignores_stale_earlier_error(rig):
+    snd = FailingAplaySound(err=None)
+    snd.last_error = dict(APLAY_ERR)       # from an earlier blast
+    rig.state.sound = snd
+    assert rig.client.post("/api/test-blast", json={"level": 1}).status_code == 200
+
+
+def test_status_includes_sound_error(rig):
+    assert rig.client.get("/api/status").json()["sound_error"] is None
+    snd = FailingAplaySound()
+    snd.last_error = APLAY_ERR
+    rig.state.sound = snd
+    assert rig.client.get("/api/status").json()["sound_error"] == APLAY_ERR
+
+
 def test_test_blast_sound_failure(rig):
     rig.sound.fail = True
     r = rig.client.post("/api/test-blast", json={"level": 1})

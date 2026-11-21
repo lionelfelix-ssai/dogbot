@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
@@ -31,6 +32,10 @@ BOUNDARY = "frame"
 EVENTS_LIMIT_MAX = 500
 EVENTS_LIMIT_DEFAULT = 50
 NO_STORE = {"Cache-Control": "no-store"}
+# After a test blast starts, watch this long for aplay failing at once (no
+# device, busy device): the owner then sees the error instead of "ok".
+TEST_BLAST_CHECK_S = 0.3
+TEST_BLAST_POLL_S = 0.02
 
 # Fields PUT /api/settings may change. `zone` has its own route.
 EDITABLE = frozenset(f.name for f in fields(Settings)) - {"zone"}
@@ -185,6 +190,7 @@ def create_app(state: AppState) -> FastAPI:
         s = state.get_settings()
         st["enabled"] = s.enabled     # authoritative now, not at the next tick
         st["zone_set"] = bool(s.zone)
+        st["sound_error"] = getattr(state.sound, "last_error", None)
         return st
 
     @app.get("/api/settings")
@@ -242,13 +248,24 @@ def create_app(state: AppState) -> FastAPI:
             raise HTTPException(422, "level must be 1, 2 or 3")
         # Calibration: plays even when disarmed or disabled, by design.
         s = state.get_settings()
+        sound = state.sound
+        before = getattr(sound, "last_error", None)
         try:
-            state.sound.handle(PlayBlasts(1, level))
+            sound.handle(PlayBlasts(1, level))
         except Exception as e:
             log.exception("test blast failed")
             state.events.log("error", {"source": "sound", "command": "test_blast",
                                        "error": repr(e)})
             raise HTTPException(503, f"sound failed: {e}") from None
+        if hasattr(sound, "last_error"):
+            # aplay runs in the background; catch it failing right away. The
+            # error event itself comes from SoundAction's on_error.
+            deadline = time.monotonic() + TEST_BLAST_CHECK_S
+            while time.monotonic() < deadline:
+                err = sound.last_error
+                if err is not None and err is not before:
+                    raise HTTPException(503, f"sound failed: {err.get('error')}")
+                time.sleep(TEST_BLAST_POLL_S)
         state.events.log("test_blast", {"level": level, "gain": s.levels[level]})
         return {"ok": True, "level": level, "gain": s.levels[level]}
 

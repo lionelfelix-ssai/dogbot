@@ -73,9 +73,17 @@ def _real_detector(hef):
     return HailoDetector(hef)
 
 
-def _real_sound(settings_getter):
+def _real_sound(settings_getter, on_error=None):
     from dogbot.actions.sound import SoundAction
-    return SoundAction(settings_getter)
+    return SoundAction(settings_getter, on_error=on_error)
+
+
+def _sound_error_logger(events) -> Callable[[dict], None]:
+    """on_error for SoundAction: aplay failed on its own (R16)."""
+    def on_error(d: dict) -> None:
+        log.error("sound failed: %s (device %s)", d.get("error"), d.get("device"))
+        events.log("error", {"source": "sound", **d})
+    return on_error
 
 
 def _real_pipeline(settings_getter, events, sound, frame_source, detector):
@@ -90,7 +98,7 @@ def build(args: argparse.Namespace, *, make_source=_real_source, make_detector=_
     data = Path(args.data_dir)
     events = EventStore(data / "events.db", data / "snapshots")
     state = AppState.from_path(Path(args.config), events)
-    sound = make_sound(state.get_settings)
+    sound = make_sound(state.get_settings, on_error=_sound_error_logger(events))
     state.sound = sound
 
     source = make_source(lens_position=args.lens_position)
