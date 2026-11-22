@@ -1,0 +1,25 @@
+[Unit]
+Description=DogBot couch guard (camera + Hailo-8L + sound, web UI on :8080)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+# admin is already in these groups; listed so the unit doesn't depend on it.
+# video: /dev/video*, /dev/media*, /dev/dma_heap/* (camera). audio: ALSA.
+# render: GPU nodes. /dev/hailo0 is world-rw (crw-rw-rw- root root) from the
+# hailort udev rule, so it needs no group.
+SupplementaryGroups=video audio render
+WorkingDirectory=/home/admin/dogbot
+Environment=PYTHONUNBUFFERED=1
+Environment=DOGBOT_CONFIG=/home/admin/dogbot/config/settings.json
+Environment=DOGBOT_DATA=/home/admin/dogbot/data
+ExecStart=/home/admin/dogbot/.venv/bin/python -m dogbot --port 8080
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

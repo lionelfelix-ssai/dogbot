@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dogbot"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["numpy", "fastapi", "uvicorn", "supervision>=0.26,<0.28", "opencv-python-headless"]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[tool.setuptools.packages.find]
+include = ["dogbot*"]
+
+[tool.setuptools.package-data]
+"dogbot.web" = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["pi: requires Raspberry Pi hardware (hailo_platform); skipped otherwise"]

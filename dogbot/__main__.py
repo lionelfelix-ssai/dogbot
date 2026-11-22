@@ -1,0 +1,303 @@
+"""The DogBot service: `python -m dogbot [--port 8080] [--hef PATH]`.
+
+Opens the camera and the Hailo device, starts the pipeline thread, and
+serves the web app with uvicorn on 0.0.0.0:8080. Settings come from
+`config/settings.json` (DOGBOT_CONFIG overrides); the event DB and snapshots
+live under `--data-dir` (default `data/`).
+
+Shutdown (SIGTERM from `systemctl stop`, or Ctrl-C): the server's signal
+handler sets `state.stop` first, which ends open MJPEG streams (otherwise
+uvicorn waits for them forever) and the pipeline loop. Then: stop sound,
+join the pipeline thread, close Hailo and the camera.
+
+uvicorn restores the previous signal handlers after a graceful shutdown and
+re-raises the captured signal. We install our own SIGTERM handler first, so
+that re-raise lands in `_make_stop_handler` (SystemExit(0)) and the cleanup
+in `main`'s `finally` runs instead of the process dying on the default
+handler. The same handler covers a SIGTERM during startup.
+
+Watchdog (I-1): a daemon thread checks the pipeline status. Once the first
+tick has happened, if `updated_at` stops advancing for WATCHDOG_STALL_S (a
+capture or inference call hung), it stops the sound, logs an `error` event
+{source: pipeline, error: stalled} and calls os._exit(1): systemd
+(Restart=on-failure) restarts the service with fresh camera/Hailo handles.
+"""
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import logging
+import os
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+from dogbot.config import settings_path
+from dogbot.events import EventStore
+from dogbot.web.app import AppState, make_server
+
+log = logging.getLogger("dogbot")
+
+DEFAULT_HEF = "/home/admin/models/yolo26s.hef"
+DEFAULT_PORT = 8080
+JOIN_TIMEOUT_S = 3.0
+WATCHDOG_STALL_S = 3.0
+WATCHDOG_INTERVAL_S = 0.5
+
+
+def parse_args(argv=None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(prog="python -m dogbot",
+                                 description="DogBot couch guard service")
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--hef", default=DEFAULT_HEF, help="YOLO26 HEF for the Hailo-8L")
+    ap.add_argument("--config", default=str(settings_path()),
+                    help="settings file (default: $DOGBOT_CONFIG or config/settings.json)")
+    ap.add_argument("--data-dir", default=os.environ.get("DOGBOT_DATA", "data"),
+                    help="event DB and snapshots (default: $DOGBOT_DATA or data/)")
+    ap.add_argument("--lens-position", type=float, default=None,
+                    help="fixed focus (dioptres); default continuous autofocus")
+    ap.add_argument("--allowed-hosts", default=os.environ.get("DOGBOT_ALLOWED_HOSTS"),
+                    help="comma-separated Host header values to accept (default: "
+                         "$DOGBOT_ALLOWED_HOSTS, else localhost, 127.0.0.1, the "
+                         "hostname, <hostname>.local and this machine's IPv4 addresses)")
+    return ap.parse_args(argv)
+
+
+def _local_ipv4s() -> list[str]:
+    """This machine's IPv4 addresses, best effort, stdlib only (plus
+    `hostname -I` on Linux, which lists every interface address)."""
+    found: list[str] = ["127.0.0.1"]
+
+    def add(ip: str) -> None:
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return
+        if addr.version == 4 and not addr.is_unspecified and ip not in found:
+            found.append(ip)
+
+    if sys.platform.startswith("linux"):
+        try:
+            out = subprocess.run(["hostname", "-I"], capture_output=True, text=True,
+                                 timeout=2).stdout
+            for tok in out.split():
+                add(tok)
+        except Exception:
+            log.warning("hostname -I failed", exc_info=True)
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            add(info[4][0])
+    except OSError:
+        pass
+    try:  # the address of the default route's interface (no packet is sent)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            add(s.getsockname()[0])
+    except OSError:
+        pass
+    return found
+
+
+def resolve_allowed_hosts(args: argparse.Namespace) -> list[str]:
+    """Host header allowlist for the web app (DNS-rebinding guard)."""
+    if args.allowed_hosts:
+        hosts = [h.strip() for h in args.allowed_hosts.split(",") if h.strip()]
+        if hosts:
+            return hosts
+    name = socket.gethostname()
+    short = name.split(".")[0]
+    hosts = ["localhost", "127.0.0.1", name, short, f"{short}.local"]
+    hosts += _local_ipv4s()
+    return list(dict.fromkeys(h for h in hosts if h))
+
+
+@dataclass
+class Runtime:
+    state: AppState
+    events: Any
+    sound: Any
+    source: Any
+    detector: Any
+    pipeline: Any
+
+
+def _real_source(lens_position=None):
+    from dogbot.pipeline import PicameraSource
+    return PicameraSource(lens_position=lens_position)
+
+
+def _real_detector(hef):
+    from dogbot.hailo_runner import HailoDetector
+    return HailoDetector(hef)
+
+
+def _real_sound(settings_getter, on_error=None):
+    from dogbot.actions.sound import SoundAction
+    return SoundAction(settings_getter, on_error=on_error)
+
+
+def _sound_error_logger(events) -> Callable[[dict], None]:
+    """on_error for SoundAction: aplay failed on its own (R16)."""
+    def on_error(d: dict) -> None:
+        log.error("sound failed: %s (device %s)", d.get("error"), d.get("device"))
+        events.log("error", {"source": "sound", **d})
+    return on_error
+
+
+def _real_pipeline(settings_getter, events, sound, frame_source, detector):
+    from dogbot.pipeline import Pipeline
+    return Pipeline(settings_getter, events, sound, frame_source, detector)
+
+
+def build(args: argparse.Namespace, *, make_source=_real_source, make_detector=_real_detector,
+          make_sound=_real_sound, make_pipeline=_real_pipeline) -> Runtime:
+    """Construct everything; nothing runs yet. Raises if the camera or the
+    Hailo device can't be opened (systemd restarts the service)."""
+    data = Path(args.data_dir)
+    events = EventStore(data / "events.db", data / "snapshots")
+    state = AppState.from_path(Path(args.config), events)
+    sound = make_sound(state.get_settings, on_error=_sound_error_logger(events))
+    state.sound = sound
+
+    source = make_source(lens_position=args.lens_position)
+    try:
+        detector = make_detector(args.hef)
+    except BaseException:
+        _quietly(source.close, "camera close")
+        raise
+    pipeline = make_pipeline(state.get_settings, events, sound, source, detector)
+    state.pipeline = pipeline
+
+    events.log("startup", {"port": args.port, "hef": args.hef, "pid": os.getpid(),
+                           "config": str(args.config)})
+    return Runtime(state, events, sound, source, detector, pipeline)
+
+
+def _quietly(fn: Callable[[], Any], what: str) -> None:
+    try:
+        fn()
+    except Exception:
+        log.exception("%s failed", what)
+
+
+def shutdown(rt: Runtime | None, thread: threading.Thread | None) -> None:
+    """Stop sound, stop the pipeline, close Hailo and the camera."""
+    if rt is None:
+        return
+    rt.state.shutdown()                       # ends MJPEG streams + pipeline loop
+    _quietly(rt.sound.stop, "sound stop")
+    if thread is not None:
+        thread.join(JOIN_TIMEOUT_S)
+        if thread.is_alive():
+            log.warning("pipeline thread still running after %.0fs; closing devices anyway",
+                        JOIN_TIMEOUT_S)
+    _quietly(rt.sound.stop, "sound stop")     # in case the last tick started a blast
+    _quietly(rt.detector.close, "Hailo close")
+    _quietly(rt.source.close, "camera close")
+    log.info("DogBot stopped")
+
+
+class Watchdog:
+    """Exits the process when the pipeline stops updating its status.
+
+    Not armed until the first tick (`updated_at` is None until then), so a
+    slow camera/Hailo start never trips it, and never fires while the
+    service is shutting down."""
+
+    def __init__(self, status_fn: Callable[[], dict], sound, events, *,
+                 stall_s: float = WATCHDOG_STALL_S,
+                 clock: Callable[[], float] = time.monotonic,
+                 exit_fn: Callable[[int], Any] = os._exit,
+                 is_stopping: Callable[[], bool] = lambda: False):
+        self._status = status_fn
+        self._sound = sound
+        self._events = events
+        self._stall_s = stall_s
+        self._clock = clock
+        self._exit = exit_fn
+        self._is_stopping = is_stopping
+
+    def check(self) -> bool:
+        """One look; True if it fired."""
+        if self._is_stopping():
+            return False
+        try:
+            updated_at = self._status().get("updated_at")
+        except Exception:
+            log.exception("watchdog: status() failed")
+            return False
+        if updated_at is None:
+            return False                       # not armed until the first tick
+        age = self._clock() - updated_at
+        if age < self._stall_s or self._is_stopping():
+            return False
+        log.error("watchdog: pipeline stalled (no update for %.1fs); exiting for a restart", age)
+        _quietly(self._sound.stop, "watchdog sound stop")
+        _quietly(lambda: self._events.log("error", {"source": "pipeline", "error": "stalled"}),
+                 "watchdog event log")
+        self._exit(1)
+        return True
+
+    def run(self, stop: threading.Event, interval: float = WATCHDOG_INTERVAL_S) -> None:
+        while not stop.wait(interval):
+            if self.check():
+                return
+
+
+class _Holder:
+    runtime: Runtime | None = None
+    stopping: bool = False
+
+
+def _make_stop_handler(holder: _Holder):
+    def handler(signum, frame):
+        if holder.stopping:
+            return                            # already shutting down
+        holder.stopping = True
+        if holder.runtime is not None:
+            holder.runtime.state.shutdown()
+        log.info("signal %s: shutting down", signum)
+        raise SystemExit(0)
+    return handler
+
+
+def main(argv=None, *, build_fn: Callable[[argparse.Namespace], Runtime] = build,
+         server_factory=make_server) -> None:
+    args = parse_args(argv)
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    holder = _Holder()
+    previous = signal.signal(signal.SIGTERM, _make_stop_handler(holder))
+    thread = None
+    try:
+        holder.runtime = rt = build_fn(args)
+        thread = threading.Thread(target=rt.pipeline.run_forever, args=(rt.state.stop,),
+                                  name="dogbot-pipeline", daemon=True)
+        thread.start()
+        dog = Watchdog(rt.pipeline.status, rt.sound, rt.events,
+                       is_stopping=lambda: holder.stopping or rt.state.stop.is_set())
+        threading.Thread(target=dog.run, args=(rt.state.stop,), name="dogbot-watchdog",
+                         daemon=True).start()
+        hosts = resolve_allowed_hosts(args)
+        log.info("DogBot listening on http://%s:%d (allowed Host: %s)", args.host, args.port,
+                 ", ".join(hosts))
+        server_factory(rt.state, args.host, args.port, allowed_hosts=hosts).run()
+    except KeyboardInterrupt:
+        pass                                  # Ctrl-C: uvicorn re-raises it after shutdown
+    finally:
+        holder.stopping = True
+        try:
+            shutdown(holder.runtime, thread)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
+
+if __name__ == "__main__":
+    main()
