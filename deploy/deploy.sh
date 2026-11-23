@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deploy DogBot to the Pi and (re)start the service.
 #
-#   ./deploy/deploy.sh            # uses admin@192.168.7.208
+#   ./deploy/deploy.sh            # uses admin@192.168.7.222
 #   DOGBOT_HOST=admin@ai-robot ./deploy/deploy.sh
 #
 # Keeps the Pi's config/, data/ and .venv. The venv uses --system-site-packages
@@ -10,7 +10,7 @@
 # fails if numpy changes anyway.
 set -euo pipefail
 
-HOST="${DOGBOT_HOST:-admin@192.168.7.208}"
+HOST="${DOGBOT_HOST:-admin@192.168.7.222}"
 DEST=/home/admin/dogbot
 cd "$(dirname "$0")/.."
 

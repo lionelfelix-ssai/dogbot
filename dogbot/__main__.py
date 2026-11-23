@@ -63,11 +63,21 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="event DB and snapshots (default: $DOGBOT_DATA or data/)")
     ap.add_argument("--lens-position", type=float, default=None,
                     help="fixed focus (dioptres); default continuous autofocus")
+    ap.add_argument("--camera", choices=("picamera", "uvc"),
+                    default=os.environ.get("DOGBOT_CAMERA", "picamera"),
+                    help="picamera = Pi CSI camera; uvc = USB camera "
+                         "(default: $DOGBOT_CAMERA or picamera)")
+    ap.add_argument("--camera-device", default=os.environ.get("DOGBOT_CAMERA_DEVICE"),
+                    help="USB camera path for --camera uvc, ideally /dev/v4l/by-id/... "
+                         "(default: $DOGBOT_CAMERA_DEVICE)")
     ap.add_argument("--allowed-hosts", default=os.environ.get("DOGBOT_ALLOWED_HOSTS"),
                     help="comma-separated Host header values to accept (default: "
                          "$DOGBOT_ALLOWED_HOSTS, else localhost, 127.0.0.1, the "
                          "hostname, <hostname>.local and this machine's IPv4 addresses)")
-    return ap.parse_args(argv)
+    args = ap.parse_args(argv)
+    if args.camera == "uvc" and not args.camera_device:
+        ap.error("--camera uvc needs --camera-device (or $DOGBOT_CAMERA_DEVICE)")
+    return args
 
 
 def _local_ipv4s() -> list[str]:
@@ -128,7 +138,10 @@ class Runtime:
     pipeline: Any
 
 
-def _real_source(lens_position=None):
+def _real_source(lens_position=None, camera="picamera", device=None):
+    if camera == "uvc":
+        from dogbot.pipeline import UvcSource
+        return UvcSource(device)
     from dogbot.pipeline import PicameraSource
     return PicameraSource(lens_position=lens_position)
 
@@ -166,7 +179,8 @@ def build(args: argparse.Namespace, *, make_source=_real_source, make_detector=_
     sound = make_sound(state.get_settings, on_error=_sound_error_logger(events))
     state.sound = sound
 
-    source = make_source(lens_position=args.lens_position)
+    source = make_source(lens_position=args.lens_position, camera=args.camera,
+                         device=args.camera_device)
     try:
         detector = make_detector(args.hef)
     except BaseException:
