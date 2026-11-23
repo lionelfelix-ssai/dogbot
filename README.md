@@ -65,6 +65,28 @@ sudo systemctl restart dogbot
 sudo systemctl stop dogbot                # stops in about 1 s, even with the live view open
 ```
 
+### Choosing the camera
+
+DogBot uses the Pi camera (IMX708) by default. To use a USB (UVC) camera
+instead, such as the wide-angle Huddly GO, set two environment variables in a
+systemd drop-in. A drop-in survives `deploy.sh`, which reinstalls the main
+unit. Use the stable `/dev/v4l/by-id/...` path (`ls /dev/v4l/by-id/`), not
+`/dev/videoN`, which can change between boots:
+
+```sh
+sudo mkdir -p /etc/systemd/system/dogbot.service.d
+sudo tee /etc/systemd/system/dogbot.service.d/camera.conf <<'EOF'
+[Service]
+Environment=DOGBOT_CAMERA=uvc
+Environment=DOGBOT_CAMERA_DEVICE=/dev/v4l/by-id/usb-Huddly_Huddly_GO_<serial>-video-index0
+EOF
+sudo systemctl daemon-reload && sudo systemctl restart dogbot
+```
+
+The USB camera is read as MJPG 1280x720 at 30 fps, and black warm-up frames
+are skipped. Remove the drop-in to go back to the Pi camera. Redraw the couch
+zone after switching, because the field of view is different.
+
 To run it by hand for debugging, stop the service first, because the camera
 and the Hailo can only be opened by one process:
 

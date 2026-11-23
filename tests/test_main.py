@@ -27,9 +27,11 @@ class Recorder:
 
 
 class FakeSource:
-    def __init__(self, rec, lens_position=None):
+    def __init__(self, rec, lens_position=None, camera="picamera", device=None):
         self.rec = rec
         self.lens_position = lens_position
+        self.camera = camera
+        self.device = device
         rec.add("source.open")
 
     def capture(self):
@@ -97,7 +99,7 @@ class FakePipeline:
 
 def factories(rec):
     return dict(
-        make_source=lambda lens_position=None: FakeSource(rec, lens_position),
+        make_source=lambda **kw: FakeSource(rec, **kw),
         make_detector=lambda hef: FakeDetector(rec, hef),
         make_sound=lambda getter, on_error=None: FakeSound(rec, getter, on_error),
         make_pipeline=lambda *a, **k: FakePipeline(rec, *a, **k),
@@ -494,3 +496,30 @@ def test_main_always_passes_a_host_list(tmp_path, monkeypatch):
                  server_factory=SignalServer)
     hosts = SignalServer.created[0].allowed_hosts
     assert isinstance(hosts, list) and "localhost" in hosts and "127.0.0.1" in hosts
+
+
+def test_camera_defaults_to_picamera(tmp_path, monkeypatch):
+    monkeypatch.delenv("DOGBOT_CAMERA", raising=False)
+    rec = Recorder()
+    rt = svc.build(args_for(tmp_path), **factories(rec))
+    assert rt.source.camera == "picamera" and rt.source.device is None
+
+
+def test_uvc_camera_and_device_reach_the_source(tmp_path):
+    rec = Recorder()
+    rt = svc.build(args_for(tmp_path, "--camera", "uvc", "--camera-device", "/dev/v4l/by-id/x"),
+                   **factories(rec))
+    assert rt.source.camera == "uvc" and rt.source.device == "/dev/v4l/by-id/x"
+
+
+def test_camera_from_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOGBOT_CAMERA", "uvc")
+    monkeypatch.setenv("DOGBOT_CAMERA_DEVICE", "/dev/v4l/by-id/y")
+    a = args_for(tmp_path)
+    assert a.camera == "uvc" and a.camera_device == "/dev/v4l/by-id/y"
+
+
+def test_uvc_without_device_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.delenv("DOGBOT_CAMERA_DEVICE", raising=False)
+    with pytest.raises(SystemExit):
+        args_for(tmp_path, "--camera", "uvc")

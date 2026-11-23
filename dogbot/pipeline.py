@@ -121,6 +121,61 @@ class PicameraSource:
         self._cam.close()
 
 
+class UvcSource:
+    """USB (UVC) camera, e.g. the Huddly GO (~150 deg FOV): MJPG 1280x720 via
+    OpenCV/V4L2. Gives the same pair as PicameraSource: main BGR frame at
+    `size`, plus the frame as RGB letterboxed to 640x640 for the Hailo.
+
+    Some cameras (Huddly) send black frames for ~1 s after opening; the
+    constructor discards near-black frames for up to `warmup_s`. A failed
+    read raises, which puts the pipeline in fault (no sound) until frames
+    return. Use a stable /dev/v4l/by-id/... path: /dev/videoN can change.
+    """
+
+    BLACK_MEAN = 2.0
+
+    def __init__(self, device: str, size=(1280, 720), fps: int = 30,
+                 warmup_s: float = 5.0, open_capture=None):
+        self.size = size
+        self.device = device
+        if open_capture is None:
+            open_capture = lambda dev: cv2.VideoCapture(dev, cv2.CAP_V4L2)  # noqa: E731
+        self._cap = open_capture(device)
+        if not self._cap.isOpened():
+            self._cap.release()
+            raise RuntimeError(f"cannot open USB camera {device}")
+        self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, size[0])
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, size[1])
+        self._cap.set(cv2.CAP_PROP_FPS, fps)
+        self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self._pending = None
+        deadline = time.monotonic() + warmup_s
+        while True:
+            ok, frame = self._cap.read()
+            if ok and frame is not None and (frame.mean() > self.BLACK_MEAN
+                                             or time.monotonic() >= deadline):
+                self._pending = frame
+                break
+            if not ok and time.monotonic() >= deadline:
+                break
+
+    def capture(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._pending is not None:
+            frame, self._pending = self._pending, None
+        else:
+            ok, frame = self._cap.read()
+            if not ok or frame is None:
+                raise RuntimeError(f"USB camera {self.device}: no frame")
+        if (frame.shape[1], frame.shape[0]) != tuple(self.size):
+            frame = cv2.resize(frame, self.size, interpolation=cv2.INTER_AREA)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        return frame, pad_to_square(rgb, *self.size)
+
+    def close(self) -> None:
+        self._cap.release()
+
+
 class Pipeline:
     def __init__(self, settings_getter: Callable[[], Settings], events, sound,
                  frame_source, detector, clock: Callable[[], float] = time.monotonic,
